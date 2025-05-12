@@ -17,17 +17,17 @@ class MCMCStrategy(Strategy):
 
     This strategy will:
 
-    - Periodically teleport GSs with low opacity to a place that has high opacity.
-    - Periodically introduce new GSs sampled based on the opacity distribution.
-    - Periodically perturb the GSs locations.
+    - Periodically teleport primitivess with low opacity to a place that has high opacity.
+    - Periodically introduce new primitivess sampled based on the opacity distribution.
+    - Periodically perturb the primitivess locations.
 
     Args:
-        cap_max (int): Maximum number of GSs. Default to 1_000_000.
+        cap_max (int): Maximum number of primitivess. Default to 1_000_000.
         noise_lr (float): MCMC samping noise learning rate. Default to 5e5.
-        refine_start_iter (int): Start refining GSs after this iteration. Default to 500.
-        refine_stop_iter (int): Stop refining GSs after this iteration. Default to 25_000.
-        refine_every (int): Refine GSs every this steps. Default to 100.
-        min_opacity (float): GSs with opacity below this value will be pruned. Default to 0.005.
+        refine_start_iter (int): Start refining primitivess after this iteration. Default to 500.
+        refine_stop_iter (int): Stop refining primitivess after this iteration. Default to 25_000.
+        refine_every (int): Refine primitivess every this steps. Default to 100.
+        min_opacity (float): primitivess with opacity below this value will be pruned. Default to 0.005.
         verbose (bool): Whether to print verbose information. Default to False.
 
     Examples:
@@ -56,12 +56,7 @@ class MCMCStrategy(Strategy):
 
     def initialize_state(self) -> Dict[str, Any]:
         """Initialize and return the running state for this strategy."""
-        n_max = 51
-        binoms = torch.zeros((n_max, n_max))
-        for n in range(n_max):
-            for k in range(n + 1):
-                binoms[n, k] = math.comb(n, k)
-        return {"binoms": binoms}
+        pass
 
     def check_sanity(
         self,
@@ -73,7 +68,7 @@ class MCMCStrategy(Strategy):
         Check if:
             * `params` and `optimizers` have the same keys.
             * Each optimizer has exactly one param_group, corresponding to each parameter.
-            * The following keys are present: {"means", "scales", "quats", "opacities"}.
+            * The following keys are present: {"means", "opacities"}.
 
         Raises:
             AssertionError: If any of the above conditions is not met.
@@ -86,7 +81,7 @@ class MCMCStrategy(Strategy):
 
         super().check_sanity(params, optimizers)
         # The following keys are required for this strategy.
-        for key in ["means", "scales", "quats", "opacities"]:
+        for key in ["means", "opacities"]:
             assert key in params, f"{key} is required in params but missing."
 
     # def step_pre_backward(
@@ -112,76 +107,68 @@ class MCMCStrategy(Strategy):
         """Callback function to be executed after the `loss.backward()` call.
 
         Args:
-            lr (float): Learning rate for "means" attribute of the GS.
+            lr (float): Learning rate for "means" attribute of the primitives.
         """
-        # move to the correct device
-        state["binoms"] = state["binoms"].to(params["means"].device)
-
-        binoms = state["binoms"]
 
         if (
             step < self.refine_stop_iter
             and step > self.refine_start_iter
             and step % self.refine_every == 0
         ):
-            # teleport GSs
-            n_relocated_gs = self._relocate_gs(params, optimizers, binoms)
+            # teleport primitivess
+            n_relocated_primitive = self._relocate_primitive(params, optimizers)
             if self.verbose:
-                print(f"Step {step}: Relocated {n_relocated_gs} GSs.")
+                print(f"Step {step}: Relocated {n_relocated_primitive} primitivess.")
 
-            # add new GSs
-            n_new_gs = self._add_new_gs(params, optimizers, binoms)
+            # add new primitivess
+            n_new_primitive = self._add_new_primitive(params, optimizers)
             if self.verbose:
                 print(
-                    f"Step {step}: Added {n_new_gs} GSs. "
-                    f"Now having {len(params['means'])} GSs."
+                    f"Step {step}: Added {n_new_primitive} primitivess. "
+                    f"Now having {len(params['means'])} primitivess."
                 )
 
             torch.cuda.empty_cache()
 
-        # add noise to GSs
+        # add noise to primitivess
         inject_noise_to_position(
             params=params, optimizers=optimizers, state={}, scaler=lr * self.noise_lr
         )
 
     @torch.no_grad()
-    def _relocate_gs(
+    def _relocate_primitive(
         self,
         params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         optimizers: Dict[str, torch.optim.Optimizer],
-        binoms: Tensor,
     ) -> int:
         opacities = torch.sigmoid(params["opacities"].flatten())
         dead_mask = opacities <= self.min_opacity
-        n_gs = dead_mask.sum().item()
-        if n_gs > 0:
+        n_primitive = dead_mask.sum().item()
+        if n_primitive > 0:
             relocate(
                 params=params,
                 optimizers=optimizers,
                 state={},
                 mask=dead_mask,
-                binoms=binoms,
                 min_opacity=self.min_opacity,
             )
-        return n_gs
+        return n_primitive
 
     @torch.no_grad()
-    def _add_new_gs(
+    def _add_new_primitive(
         self,
         params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         optimizers: Dict[str, torch.optim.Optimizer],
-        binoms: Tensor,
     ) -> int:
         current_n_points = len(params["means"])
         n_target = min(self.cap_max, int(1.05 * current_n_points))
-        n_gs = max(0, n_target - current_n_points)
-        if n_gs > 0:
+        n_primitive = max(0, n_target - current_n_points)
+        if n_primitive > 0:
             sample_add(
                 params=params,
                 optimizers=optimizers,
                 state={},
-                n=n_gs,
-                binoms=binoms,
+                n=n_primitive,
                 min_opacity=self.min_opacity,
             )
-        return n_gs
+        return n_primitive
