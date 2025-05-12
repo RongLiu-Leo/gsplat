@@ -436,7 +436,7 @@ class Runner:
                 **kwargs,
             )
         elif self.model_type == "2dgs-inria":
-            render_colors, render_alphas, info = rasterization_2dgs_inria_wrapper(
+            renders, info = rasterization_2dgs_inria_wrapper(
                 means=means,
                 quats=quats,
                 scales=scales,
@@ -577,6 +577,10 @@ class Runner:
                 step=step,
                 info=info,
             )
+            masks = data["mask"].to(device) if "mask" in data else None
+            if masks is not None:
+                pixels = pixels * masks[..., None]
+                colors = colors * masks[..., None]
 
             # loss
             l1loss = F.l1_loss(colors, pixels)
@@ -727,7 +731,7 @@ class Runner:
 
             if not cfg.disable_viewer:
                 self.viewer.lock.release()
-                num_train_steps_per_sec = 1.0 / (time.time() - tic)
+                num_train_steps_per_sec = 1.0 / (max(time.time() - tic, 1e-10))
                 num_train_rays_per_sec = (
                     num_train_rays_per_step * num_train_steps_per_sec
                 )
@@ -777,7 +781,7 @@ class Runner:
             colors = torch.clamp(colors, 0.0, 1.0)
             colors = colors[..., :3]  # Take RGB channels
             torch.cuda.synchronize()
-            ellipse_time += time.time() - tic
+            ellipse_time += max(time.time() - tic, 1e-10)
 
             # write images
             canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
@@ -910,7 +914,7 @@ class Runner:
 
             # write images
             canvas = torch.cat(
-                [colors, depths.repeat(1, 1, 3)], dim=1 if width > height else 1
+                [colors, depths.repeat(1, 1, 3)], dim=0 if width > height else 1
             )
             canvas = (canvas.cpu().numpy() * 255).astype(np.uint8)
             canvas_all.append(canvas)
