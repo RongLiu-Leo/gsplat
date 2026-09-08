@@ -359,6 +359,7 @@
     <span class="n">rasterize_to_pixels_eval3d_extra</span><span class="p">,</span>
     <span class="n">renderer_config_mixed_batch</span><span class="p">,</span>
     <span class="n">renderer_config_parallel_batch</span><span class="p">,</span>
+    <span class="n">spherical_beta</span><span class="p">,</span>
     <span class="n">spherical_harmonics</span><span class="p">,</span>
 <span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">.utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">depth_to_normal</span><span class="p">,</span> <span class="n">get_projection_matrix</span>
@@ -548,6 +549,51 @@
     <span class="k">return</span> <span class="mi">16</span>
 
 
+<span class="k">def</span><span class="w"> </span><span class="nf">_evaluate_appearance_with_sb</span><span class="p">(</span>
+    <span class="n">sb_number</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">sb_params</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [N, M, 6]</span>
+    <span class="n">colors</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [..., (C,) N, 3] or [N, K, 3]</span>
+    <span class="n">sh_degree</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+    <span class="n">means</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [..., N, 3]</span>
+    <span class="n">viewmats</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [..., C, 4, 4]</span>
+    <span class="n">viewmats_rs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Compose the diffuse base color with Spherical Beta specular lobes.</span>
+
+<span class="sd">    Returns post-activation colors ``[..., C, N, 3]``, so the caller renders them</span>
+<span class="sd">    with ``sh_degree=None``. The base is either the evaluated SH color (with the</span>
+<span class="sd">    usual ``+0.5`` bias and clamp) or already-post-activation colors.</span>
+<span class="sd">    """</span>
+    <span class="n">batch_dims</span> <span class="o">=</span> <span class="n">means</span><span class="o">.</span><span class="n">shape</span><span class="p">[:</span><span class="o">-</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">N</span> <span class="o">=</span> <span class="n">means</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">C</span> <span class="o">=</span> <span class="n">viewmats</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">3</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">sh_degree</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">colors</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"sb_number requires 3-channel colors, got </span><span class="si">{</span><span class="n">colors</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">colors</span><span class="o">.</span><span class="n">dim</span><span class="p">()</span> <span class="o">==</span> <span class="nb">len</span><span class="p">(</span><span class="n">batch_dims</span><span class="p">)</span> <span class="o">+</span> <span class="mi">2</span><span class="p">:</span>
+            <span class="c1"># Turn [..., N, 3] into [..., C, N, 3]</span>
+            <span class="n">base</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">broadcast_to</span><span class="p">(</span>
+                <span class="n">colors</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="kc">None</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:],</span> <span class="n">batch_dims</span> <span class="o">+</span> <span class="p">(</span><span class="n">C</span><span class="p">,</span> <span class="n">N</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+            <span class="p">)</span><span class="o">.</span><span class="n">contiguous</span><span class="p">()</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">base</span> <span class="o">=</span> <span class="n">colors</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">base</span> <span class="o">=</span> <span class="n">spherical_harmonics</span><span class="p">(</span>
+            <span class="n">sh_degree</span><span class="p">,</span> <span class="n">means</span><span class="p">,</span> <span class="n">viewmats</span><span class="p">,</span> <span class="n">colors</span><span class="p">,</span> <span class="n">viewmats_rs</span><span class="o">=</span><span class="n">viewmats_rs</span>
+        <span class="p">)</span>  <span class="c1"># [..., C, N, 3]</span>
+        <span class="c1"># Match the SH color contract of the rasterization op, which clamps</span>
+        <span class="c1"># after the +0.5 color bias.</span>
+        <span class="n">base</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">clamp_min</span><span class="p">(</span><span class="n">base</span> <span class="o">+</span> <span class="mf">0.5</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>
+
+    <span class="n">colors</span> <span class="o">=</span> <span class="n">spherical_beta</span><span class="p">(</span>
+        <span class="n">sb_number</span><span class="p">,</span> <span class="n">means</span><span class="p">,</span> <span class="n">viewmats</span><span class="p">,</span> <span class="n">base</span><span class="p">,</span> <span class="n">sb_params</span><span class="p">,</span> <span class="n">viewmats_rs</span><span class="o">=</span><span class="n">viewmats_rs</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">torch</span><span class="o">.</span><span class="n">clamp_min</span><span class="p">(</span><span class="n">colors</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">)</span>
+
+
 <div class="viewcode-block" id="rasterization">
 <a class="viewcode-back" href="../../apis/rasterization.html#gsplat.rasterization">[docs]</a>
 <span class="nd">@trace_function</span><span class="p">(</span><span class="s2">"render"</span><span class="p">)</span>
@@ -608,6 +654,9 @@
         <span class="nb">int</span>
     <span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># Currently only None or 3 is accepted.</span>
     <span class="n">renderer_config</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">RendererConfig</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="c1"># spherical beta (view-dependent specular lobes, independent of sh_degree)</span>
+    <span class="n">sb_params</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># [N, M, 6]</span>
+    <span class="n">sb_number</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
 <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tuple</span><span class="p">[</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">Tensor</span><span class="p">,</span> <span class="n">Dict</span><span class="p">]:</span>
 <span class="w">    </span><span class="sd">"""Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).</span>
 
@@ -640,6 +689,18 @@
 <span class="sd">        where K is the number of SH bases and D is the number of feature channels. In this case, it is expected</span>
 <span class="sd">        that :math:`(\\textit{sh_degree} + 1) ^ 2 \\leq K`, where `sh_degree` controls the</span>
 <span class="sd">        activated bases in the SH coefficients.</span>
+
+<span class="sd">    .. note::</span>
+<span class="sd">        **Spherical Beta**: Setting `sb_number` adds `sb_number` view-dependent specular</span>
+<span class="sd">        lobes on top of the base color, as in `Deformable Beta Splatting</span>
+<span class="sd">        &lt;https://arxiv.org/abs/2501.18630&gt;`_ by Liu et al. (`project page</span>
+<span class="sd">        &lt;https://rongliu-leo.github.io/beta-splatting/&gt;`_). Each lobe costs 6 values</span>
+<span class="sd">        per Gaussian and models sharp, localized highlights that low-order SH cannot.</span>
+<span class="sd">        This is independent of `sh_degree`, so the two may be combined freely:</span>
+<span class="sd">        `sh_degree=0, sb_number=0` is purely diffuse, `sh_degree=3, sb_number=0` is</span>
+<span class="sd">        plain SH, `sh_degree=0, sb_number=2` is the Beta Splatting configuration, and</span>
+<span class="sd">        setting both models low- and high-frequency view dependence together.</span>
+<span class="sd">        See :func:`gsplat.spherical_beta`.</span>
 
 <span class="sd">    .. note::</span>
 <span class="sd">        **Depth Rendering**: This function supports colors or/and depths via `render_mode`.</span>
@@ -804,6 +865,11 @@
 <span class="sd">            :class:`RendererConfig_MixedBatch`, which uses the existing mixed-batch</span>
 <span class="sd">            rasterizer implementation. Non-default configs require</span>
 <span class="sd">            ``with_eval3d=True``.</span>
+<span class="sd">        sb_params: Spherical Beta lobe parameters ``[N, M, 6]``, each lobe stored</span>
+<span class="sd">            as ``[r, g, b, theta, phi, beta]`` with post-activation amplitudes.</span>
+<span class="sd">            Default is None.</span>
+<span class="sd">        sb_number: Number of leading lobes in `sb_params` to evaluate. Default is</span>
+<span class="sd">            None, which disables Spherical Beta.</span>
 
 <span class="sd">    Returns:</span>
 <span class="sd">        A tuple:</span>
@@ -845,6 +911,30 @@
 
 <span class="sd">    """</span>
     <span class="n">has_color</span> <span class="o">=</span> <span class="n">render_mode_has_color</span><span class="p">(</span><span class="n">render_mode</span><span class="p">)</span>
+
+    <span class="c1"># Spherical Beta is composed here rather than inside the rasterization op:</span>
+    <span class="c1"># the C++ path fuses SH evaluation into the projection kernel and has no seam</span>
+    <span class="c1"># for a second appearance model, so when lobes are active the whole appearance</span>
+    <span class="c1"># is evaluated up front and handed down as post-activation colors.</span>
+    <span class="k">if</span> <span class="n">sb_number</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">has_color</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">"sb_number requires a color render_mode, got </span><span class="si">{</span><span class="n">render_mode</span><span class="si">}</span><span class="s2">"</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="n">sb_params</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"sb_number requires sb_params"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">colors</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"sb_number requires colors as the diffuse base"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">distributed</span><span class="p">:</span>
+            <span class="c1"># The op gathers cameras across ranks internally, so a Python-side</span>
+            <span class="c1"># evaluation would only see this rank's cameras.</span>
+            <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+                <span class="s2">"Spherical Beta is not supported with distributed=True"</span>
+            <span class="p">)</span>
+        <span class="n">colors</span> <span class="o">=</span> <span class="n">_evaluate_appearance_with_sb</span><span class="p">(</span>
+            <span class="n">sb_number</span><span class="p">,</span> <span class="n">sb_params</span><span class="p">,</span> <span class="n">colors</span><span class="p">,</span> <span class="n">sh_degree</span><span class="p">,</span> <span class="n">means</span><span class="p">,</span> <span class="n">viewmats</span><span class="p">,</span> <span class="n">viewmats_rs</span>
+        <span class="p">)</span>
+        <span class="n">sh_degree</span> <span class="o">=</span> <span class="kc">None</span>
 
     <span class="n">external_distortion_coeffs</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span>
         <span class="n">Optional</span><span class="p">[</span><span class="n">BivariateWindshieldModelParameters</span><span class="p">],</span> <span class="n">external_distortion_coeffs</span>

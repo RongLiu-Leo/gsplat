@@ -409,6 +409,7 @@
     <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterSphericalHarmonics</span><span class="p">)</span>
     <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterSphericalHarmonicsL0</span><span class="p">)</span>
     <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterSphericalHarmonicsL1Plus</span><span class="p">)</span>
+    <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterSphericalBeta</span><span class="p">)</span>
     <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterQuatScaleToCovarPreci</span><span class="p">)</span>
     <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterProjectionEWASimple</span><span class="p">)</span>
     <span class="n">_register_autograd</span><span class="p">(</span><span class="n">RegisterProjectionEWA3DGSFused</span><span class="p">)</span>
@@ -974,6 +975,174 @@
 <span class="w">    </span><span class="sd">"""Python autograd hooks for the l&gt;=1 SH op."""</span>
 
     <span class="n">base</span> <span class="o">=</span> <span class="s2">"spherical_harmonics_l1_plus"</span>
+
+
+<div class="viewcode-block" id="spherical_beta">
+<a class="viewcode-back" href="../../../apis/utils.html#gsplat.spherical_beta">[docs]</a>
+<span class="nd">@trace_function</span><span class="p">(</span><span class="s2">"sb-fwd"</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">spherical_beta</span><span class="p">(</span>
+    <span class="n">lobes_to_use</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="n">means</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [..., N, 3]</span>
+    <span class="n">viewmats</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [..., C, 4, 4]</span>
+    <span class="n">base_colors</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [..., C, N, 3] or [nnz, 3]</span>
+    <span class="n">coeffs</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">,</span>  <span class="c1"># [N, M, 6]</span>
+    <span class="n">masks</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># [..., C, N] or [nnz]</span>
+    <span class="n">batch_ids</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># [nnz]</span>
+    <span class="n">camera_ids</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># [nnz]</span>
+    <span class="n">gaussian_ids</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># [nnz]</span>
+    <span class="n">viewmats_rs</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Tensor</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># [..., C, 4, 4]</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Tensor</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Adds Spherical Beta lobes to a base color.</span>
+
+<span class="sd">    Implements the Spherical Beta color model from the paper:</span>
+
+<span class="sd">    `Deformable Beta Splatting &lt;https://arxiv.org/abs/2501.18630&gt;`_ (SIGGRAPH 2025),</span>
+<span class="sd">    by Rong Liu, Dylan Sun, Meida Chen, Yue Wang and Andrew Feng. See the</span>
+<span class="sd">    `project page &lt;https://rongliu-leo.github.io/beta-splatting/&gt;`_ and the</span>
+<span class="sd">    `reference implementation &lt;https://github.com/RongLiu-Leo/beta-splatting&gt;`_.</span>
+
+<span class="sd">    Spherical Beta models view-dependent appearance as a sum of bounded,</span>
+<span class="sd">    Phong-like specular lobes on top of a diffuse base color::</span>
+
+<span class="sd">        c(V) = c0 + sum_m rgb_m * max(R_m . V, 0) ** (4 * exp(beta_m))</span>
+
+<span class="sd">    where ``R_m`` is the unit lobe axis built from the spherical angles</span>
+<span class="sd">    ``(theta_m, phi_m)``. The sharpness is stored in log space so it stays</span>
+<span class="sd">    positive. Because a lobe reaches exactly zero at the horizon it needs no</span>
+<span class="sd">    truncation, unlike a spherical Gaussian.</span>
+
+<span class="sd">    This is an alternative to the l&gt;=1 spherical harmonic bands and costs</span>
+<span class="sd">    ``6 * M`` values per Gaussian rather than ``3 * ((degree + 1) ** 2 - 1)``.</span>
+<span class="sd">    The two are independent and may be combined; ``base_colors`` is typically</span>
+<span class="sd">    the evaluated SH color.</span>
+
+<span class="sd">    The ``rgb`` amplitudes are expected post-activation, matching the convention</span>
+<span class="sd">    for opacities and scales elsewhere in gsplat. The reference model applies</span>
+<span class="sd">    ``softplus(x, beta=10 * ln(2))``.</span>
+
+<span class="sd">    Unlike spherical harmonics this op models color only, so the channel count</span>
+<span class="sd">    is fixed at 3: a lobe's angular parameters are shared across channels.</span>
+
+<span class="sd">    Elements excluded by ``masks`` pass ``base_colors`` through unchanged.</span>
+
+<span class="sd">    The camera position is recovered from each view matrix as ``-R^T t``, with</span>
+<span class="sd">    the same orthonormality caveats as :func:`spherical_harmonics`.</span>
+
+<span class="sd">    Args:</span>
+<span class="sd">        lobes_to_use: Number of leading lobes to evaluate. Lobes beyond this</span>
+<span class="sd">            count are ignored, which allows a warmup schedule over ``M``.</span>
+<span class="sd">        means: World-space Gaussian means. ``[..., N, 3]``.</span>
+<span class="sd">        viewmats: Rigid world-to-camera matrices with orthonormal rotation</span>
+<span class="sd">            blocks. ``[..., C, 4, 4]``.</span>
+<span class="sd">        base_colors: Diffuse base color the lobes are added to, already</span>
+<span class="sd">            broadcast to one row per output element. ``[..., C, N, 3]`` in</span>
+<span class="sd">            dense mode or ``[nnz, 3]`` in packed mode.</span>
+<span class="sd">        coeffs: Lobe parameters ``[r, g, b, theta, phi, beta]``. ``[N, M, 6]``</span>
+<span class="sd">            in dense mode or ``[nnz, M, 6]`` in packed mode.</span>
+<span class="sd">        masks: Optional boolean masks. ``[..., C, N]`` or ``[nnz]``.</span>
+<span class="sd">        batch_ids: Batch indices in packed mode.</span>
+<span class="sd">        camera_ids: Camera indices in packed mode.</span>
+<span class="sd">        gaussian_ids: Gaussian indices in packed mode.</span>
+<span class="sd">        viewmats_rs: Optional rolling-shutter endpoint matrices. When provided,</span>
+<span class="sd">            the camera position is averaged across both endpoints.</span>
+
+<span class="sd">    Returns:</span>
+<span class="sd">        Base color plus lobes. ``[..., C, N, 3]`` or ``[nnz, 3]``.</span>
+<span class="sd">    """</span>
+    <span class="k">if</span> <span class="n">masks</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">masks</span> <span class="o">=</span> <span class="n">masks</span><span class="o">.</span><span class="n">contiguous</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">_make_lazy_cuda_func</span><span class="p">(</span><span class="s2">"spherical_beta"</span><span class="p">)(</span>
+        <span class="n">lobes_to_use</span><span class="p">,</span>
+        <span class="n">means</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="n">viewmats</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="n">base_colors</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="n">coeffs</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="n">masks</span><span class="p">,</span>
+        <span class="kc">None</span> <span class="k">if</span> <span class="n">batch_ids</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">batch_ids</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="kc">None</span> <span class="k">if</span> <span class="n">camera_ids</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">camera_ids</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="kc">None</span> <span class="k">if</span> <span class="n">gaussian_ids</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">gaussian_ids</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+        <span class="kc">None</span> <span class="k">if</span> <span class="n">viewmats_rs</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">viewmats_rs</span><span class="o">.</span><span class="n">contiguous</span><span class="p">(),</span>
+    <span class="p">)</span></div>
+
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">RegisterSphericalBeta</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Python autograd hooks for the gsplat::spherical_beta op."""</span>
+
+    <span class="n">base</span> <span class="o">=</span> <span class="s2">"spherical_beta"</span>
+
+    <span class="nd">@staticmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setup_context</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">inputs</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="p">(</span>
+            <span class="n">lobes_to_use</span><span class="p">,</span>
+            <span class="n">means</span><span class="p">,</span>
+            <span class="n">viewmats</span><span class="p">,</span>
+            <span class="n">_base_colors</span><span class="p">,</span>
+            <span class="n">coeffs</span><span class="p">,</span>
+            <span class="n">masks</span><span class="p">,</span>
+            <span class="n">batch_ids</span><span class="p">,</span>
+            <span class="n">camera_ids</span><span class="p">,</span>
+            <span class="n">gaussian_ids</span><span class="p">,</span>
+            <span class="n">viewmats_rs</span><span class="p">,</span>
+        <span class="p">)</span> <span class="o">=</span> <span class="n">inputs</span>
+        <span class="n">ctx</span><span class="o">.</span><span class="n">lobes_to_use</span> <span class="o">=</span> <span class="n">lobes_to_use</span>
+        <span class="c1"># The lobes are added to the base color, so its gradient is the incoming</span>
+        <span class="c1"># one and the base color itself is not needed for backward.</span>
+        <span class="n">ctx</span><span class="o">.</span><span class="n">save_for_backward</span><span class="p">(</span>
+            <span class="n">means</span><span class="p">,</span>
+            <span class="n">viewmats</span><span class="p">,</span>
+            <span class="n">coeffs</span><span class="p">,</span>
+            <span class="n">masks</span><span class="p">,</span>
+            <span class="n">batch_ids</span><span class="p">,</span>
+            <span class="n">camera_ids</span><span class="p">,</span>
+            <span class="n">gaussian_ids</span><span class="p">,</span>
+            <span class="n">viewmats_rs</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">backward</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">ctx</span><span class="p">,</span> <span class="n">v_colors</span><span class="p">:</span> <span class="n">Tensor</span><span class="p">):</span>
+        <span class="p">(</span>
+            <span class="n">means</span><span class="p">,</span>
+            <span class="n">viewmats</span><span class="p">,</span>
+            <span class="n">coeffs</span><span class="p">,</span>
+            <span class="n">masks</span><span class="p">,</span>
+            <span class="n">batch_ids</span><span class="p">,</span>
+            <span class="n">camera_ids</span><span class="p">,</span>
+            <span class="n">gaussian_ids</span><span class="p">,</span>
+            <span class="n">viewmats_rs</span><span class="p">,</span>
+        <span class="p">)</span> <span class="o">=</span> <span class="n">ctx</span><span class="o">.</span><span class="n">saved_tensors</span>
+        <span class="n">v_coeffs</span><span class="p">,</span> <span class="n">v_means</span><span class="p">,</span> <span class="n">v_viewmats</span><span class="p">,</span> <span class="n">v_viewmats_rs</span> <span class="o">=</span> <span class="n">_make_lazy_cuda_func</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="bp">cls</span><span class="o">.</span><span class="n">base</span><span class="si">}</span><span class="s2">_bwd"</span>
+        <span class="p">)(</span>
+            <span class="n">ctx</span><span class="o">.</span><span class="n">lobes_to_use</span><span class="p">,</span>
+            <span class="n">means</span><span class="p">,</span>
+            <span class="n">viewmats</span><span class="p">,</span>
+            <span class="n">coeffs</span><span class="p">,</span>
+            <span class="n">masks</span><span class="p">,</span>
+            <span class="n">batch_ids</span><span class="p">,</span>
+            <span class="n">camera_ids</span><span class="p">,</span>
+            <span class="n">gaussian_ids</span><span class="p">,</span>
+            <span class="n">viewmats_rs</span><span class="p">,</span>
+            <span class="n">v_colors</span><span class="p">,</span>
+            <span class="n">ctx</span><span class="o">.</span><span class="n">needs_input_grad</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+            <span class="n">ctx</span><span class="o">.</span><span class="n">needs_input_grad</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span>
+            <span class="c1"># PyTorch omits trailing schema-default arguments from</span>
+            <span class="c1"># needs_input_grad, even though setup_context receives them after</span>
+            <span class="c1"># fill_defaults(). viewmats_rs is therefore absent when it is None.</span>
+            <span class="nb">len</span><span class="p">(</span><span class="n">ctx</span><span class="o">.</span><span class="n">needs_input_grad</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">9</span> <span class="ow">and</span> <span class="n">ctx</span><span class="o">.</span><span class="n">needs_input_grad</span><span class="p">[</span><span class="mi">9</span><span class="p">],</span>
+        <span class="p">)</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="kc">None</span><span class="p">,</span>  <span class="c1"># lobes_to_use</span>
+            <span class="n">v_means</span><span class="p">,</span>
+            <span class="n">v_viewmats</span><span class="p">,</span>
+            <span class="n">v_colors</span> <span class="k">if</span> <span class="n">ctx</span><span class="o">.</span><span class="n">needs_input_grad</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span> <span class="k">else</span> <span class="kc">None</span><span class="p">,</span>  <span class="c1"># base_colors</span>
+            <span class="n">v_coeffs</span><span class="p">,</span>
+            <span class="kc">None</span><span class="p">,</span>  <span class="c1"># masks</span>
+            <span class="kc">None</span><span class="p">,</span>  <span class="c1"># batch_ids</span>
+            <span class="kc">None</span><span class="p">,</span>  <span class="c1"># camera_ids</span>
+            <span class="kc">None</span><span class="p">,</span>  <span class="c1"># gaussian_ids</span>
+            <span class="n">v_viewmats_rs</span><span class="p">,</span>
+        <span class="p">)</span>
 
 
 <div class="viewcode-block" id="quat_scale_to_covar_preci">
